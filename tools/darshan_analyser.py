@@ -1,6 +1,10 @@
 import argparse
 import pandas as pd
 from pathlib import Path
+
+import matplotlib
+matplotlib.use('Agg')
+
 import matplotlib.pyplot as plt
 
 def load_data(file_path: str) -> pd.DataFrame:
@@ -23,7 +27,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
     print(f"\nApplication I/O Pattern Profiling")
     print(f"Filtering criteria: >= {min_jobs} jobs AND (>= {min_volume_gb} GB OR >= {min_runtime_hours} hours)")
     
-    # 1. Filter by job count first to save computation
+    # Filter by job count first to save computation
     job_counts = df['exe'].value_counts()
     recurring_apps = job_counts[job_counts >= min_jobs].index
     
@@ -33,7 +37,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
         
     df_apps = df[df['exe'].isin(recurring_apps)].copy()
     
-    # 2. Group by application
+    # Group by application
     app_profiles = df_apps.groupby('exe').agg(
         total_jobs=('job_id', 'count'),
         total_runtime=('runtime_sec', 'sum'),
@@ -64,7 +68,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
     app_profiles['Total Vol (GB)'] = (total_rw_bytes / (1024**3)).round(2)
     app_profiles['Total Runtime (Hrs)'] = (app_profiles['total_runtime'] / 3600).round(2)
     
-    # 3. Apply Volume and Runtime Thresholds
+    # Apply Volume and Runtime Thresholds
     heavy_hitters = app_profiles[
         (app_profiles['Total Vol (GB)'] >= min_volume_gb) | 
         (app_profiles['Total Runtime (Hrs)'] >= min_runtime_hours)
@@ -74,7 +78,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
         print(f"[CLEAR] No applications met the heavy-hitter thresholds.")
         return
     
-    # 4. Calculate Ratios for the remaining heavy hitters
+    # Calculate Ratios for the remaining heavy hitters
     total_accesses = heavy_hitters['posix_reads'] + heavy_hitters['posix_writes']
     total_seq = heavy_hitters['posix_seq_reads'] + heavy_hitters['posix_seq_writes']
     
@@ -83,7 +87,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
     heavy_hitters['seq_ratio'] = (total_seq / total_accesses).fillna(0)
     heavy_hitters['uses_high_level'] = (heavy_hitters['h5_total'] > 0) | (heavy_hitters['nc_total'] > 0)
     
-    # 5. Assign Pattern Tags
+    # Assign Pattern Tags
     def assign_pattern(row):
         tags = []
         if row['uses_high_level']:
@@ -123,7 +127,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
     sorted_profiles.to_csv(save_filename)
     print("\n-> Full application profiles saved to " + save_filename)
     
-    # 6. Generate and Display Overall Pattern Summary Table
+    # Generate and Display Overall Pattern Summary Table
     print("\n" + "="*95)
     print("OVERALL I/O PATTERN GROUP SUMMARY")
     print("="*95)
@@ -144,10 +148,10 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
     summary_profiles.to_csv(save_filename)
     print("\n-> Pattern group summary saved to report_pattern_summary.csv")
 
-    # 7. Generate Data Visualisations
+    # Generate Data Visualisations
     print("\nGenerating visual reports...")
     
-    # Plot A: Top 10 Apps Stacked Bar Chart (Read vs Write)
+    # Plot Top 10 Apps Stacked Bar Chart (Read vs Write)
     top_n = min(10, len(sorted_profiles))
     top_apps = sorted_profiles.head(top_n)
     
@@ -167,7 +171,7 @@ def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_vol
     plt.savefig(save_filename, dpi=300)
     plt.close()
     
-    # Plot B: Overarching I/O Pattern Distribution (Pie Chart)
+    # Plot Overarching I/O Pattern Distribution (Pie Chart)
     plt.figure(figsize=(10, 8))
     # Filter out extremely small slices for a cleaner pie chart, group them into "Other" if necessary
     pie_data = summary_profiles['total_combined_vol']
