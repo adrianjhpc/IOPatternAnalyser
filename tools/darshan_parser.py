@@ -1,91 +1,125 @@
 import os
+import argparse
 from pathlib import Path
 import pandas as pd
 import darshan
 
+def extract_module_metrics(report: darshan.DarshanReport, module_name: str, metrics: list) -> dict:
+    """
+    Safely extracts requested metrics from both 'counters' (integers) 
+    and 'fcounters' (floats/timers) DataFrames for a given module.
+    """
+    results = {metric: 0.0 for metric in metrics}
+    
+    if module_name not in report.modules:
+        return results
+
+    try:
+        report.mod_read_all_records(module_name)
+        if module_name not in report.records:
+            return results
+        
+        mod_record = report.records[module_name]
+        if not hasattr(mod_record, 'to_df'):
+            return results
+            
+        data = mod_record.to_df()
+        
+        # PyDarshan structure: dict containing 'counters' and 'fcounters'
+        if isinstance(data, dict):
+            counters_df = data.get('counters', pd.DataFrame())
+            fcounters_df = data.get('fcounters', pd.DataFrame())
+        elif isinstance(data, pd.DataFrame):
+            # Fallback for older versions/weird structures
+            counters_df = data
+            fcounters_df = pd.DataFrame()
+        else:
+            return results
+
+        # Sum the metrics if they exist in either DataFrame
+        for metric in metrics:
+            if not counters_df.empty and metric in counters_df.columns:
+                results[metric] = counters_df[metric].sum()
+            elif not fcounters_df.empty and metric in fcounters_df.columns:
+                results[metric] = fcounters_df[metric].sum()
+                
+    except Exception:
+        # Silently catch Pandas indexing/type errors to prevent crashing the batch
+        pass
+
+    return results
+
 def aggregate_darshan_logs(base_dir: str) -> pd.DataFrame:
     """
-    Recursively finds and parses .darshan logs. 
-    Aggregates POSIX, MPI-IO, HDF5, NetCDF, and STDIO metrics inside the loop to save memory,
-    returning a single summary DataFrame where each row represents one job.
+    Recursively finds and parses .darshan logs, extracting extensive
+    metrics for system-wide I/O pattern analysis.
     """
     base_path = Path(base_dir)
     log_files = list(base_path.rglob("*.darshan"))
-    
+
     if not log_files:
         print(f"No .darshan files found in {base_dir}")
         return pd.DataFrame()
 
-    print(f"Found {len(log_files)} Darshan logs. Beginning aggregated parsing...")
-    
-    # This will hold one dictionary (row) per log file
+    print(f"Found {len(log_files)} Darshan logs. Beginning comprehensive parsing...")
     summary_records = []
+
+    # Define the exact metrics we want to pull per module
+    posix_metrics = [
+        'POSIX_BYTES_READ', 'POSIX_BYTES_WRITTEN', 
+        'POSIX_OPENS', 'POSIX_STATS', 'POSIX_SEEKS',
+        'POSIX_READS', 'POSIX_WRITES',
+        'POSIX_CONSEC_READS', 'POSIX_CONSEC_WRITES', 
+        'POSIX_SEQ_READS', 'POSIX_SEQ_WRITES',
+        'POSIX_F_READ_TIME', 'POSIX_F_WRITE_TIME', 'POSIX_F_META_TIME'
+    ]
+    
+    mpiio_metrics = [
+        'MPIIO_BYTES_READ', 'MPIIO_BYTES_WRITTEN',
+        'MPIIO_INDEP_READS', 'MPIIO_INDEP_WRITES',
+        'MPIIO_COLL_READS', 'MPIIO_COLL_WRITES',
+        'MPIIO_F_READ_TIME', 'MPIIO_F_WRITE_TIME', 'MPIIO_F_META_TIME'
+    ]
+    
+    stdio_metrics = [
+        'STDIO_BYTES_READ', 'STDIO_BYTES_WRITTEN',
+        'STDIO_OPENS', 'STDIO_READS', 'STDIO_WRITES',
+        'STDIO_F_META_TIME', 'STDIO_F_READ_TIME', 'STDIO_F_WRITE_TIME'
+    ]
+
+    h5_metrics = ['H5_BYTES_READ', 'H5_BYTES_WRITTEN', 'H5_F_META_TIME']
+    nc_metrics = ['NC_BYTES_READ', 'NC_BYTES_WRITTEN']
 
     for log_path in log_files:
         try:
-            # Initialize the report
-            report = darshan.DarshanReport(str(log_path), read_all=True)
+            report = darshan.DarshanReport(str(log_path))
             
-            # 1. Setup a base dictionary for this specific job's summary
+            # 1. Job Metadata & Runtime
+            start_time = int(report.metadata.get('start_time', 0))
+            end_time = int(report.metadata.get('end_time', 0))
+            runtime = end_time - start_time if end_time > start_time else 0
+
             record_summary = {
                 'source_file': log_path.name,
                 'job_id': report.metadata.get('jobid', 'unknown'),
+                'uid': report.metadata.get('uid', 'unknown'),
                 'exe': report.metadata.get('exe', 'unknown'),
-                'nprocs': report.metadata.get('nprocs', 1),
-                'posix_read_bytes': 0, 'posix_write_bytes': 0,
-                'mpiio_read_bytes': 0, 'mpiio_write_bytes': 0,
-                'stdio_read_bytes': 0, 'stdio_write_bytes': 0,
-                'hdf5_read_bytes': 0, 'hdf5_write_bytes': 0,
-                'netcdf_read_bytes': 0, 'netcdf_write_bytes': 0,
+                'nprocs': int(report.metadata.get('nprocs', 1)),
+                'runtime_sec': runtime
             }
-            
-            # 2. Extract POSIX Data
-            if 'POSIX' in report.records:
-                posix_df = report.records['POSIX'].to_df()
-                if 'POSIX_BYTES_READ' in posix_df.columns:
-                    record_summary['posix_read_bytes'] = posix_df['POSIX_BYTES_READ'].sum()
-                if 'POSIX_BYTES_WRITTEN' in posix_df.columns:
-                    record_summary['posix_write_bytes'] = posix_df['POSIX_BYTES_WRITTEN'].sum()
 
-            # 3. Extract MPI-IO Data
-            if 'MPI-IO' in report.records:
-                mpi_df = report.records['MPI-IO'].to_df()
-                if 'MPIIO_BYTES_READ' in mpi_df.columns:
-                    record_summary['mpiio_read_bytes'] = mpi_df['MPIIO_BYTES_READ'].sum()
-                if 'MPIIO_BYTES_WRITTEN' in mpi_df.columns:
-                    record_summary['mpiio_write_bytes'] = mpi_df['MPIIO_BYTES_WRITTEN'].sum()
+            # 2. Extract Module Metrics
+            record_summary.update(extract_module_metrics(report, 'POSIX', posix_metrics))
+            record_summary.update(extract_module_metrics(report, 'MPI-IO', mpiio_metrics))
+            record_summary.update(extract_module_metrics(report, 'STDIO', stdio_metrics))
+            record_summary.update(extract_module_metrics(report, 'H5', h5_metrics))
+            record_summary.update(extract_module_metrics(report, 'NC', nc_metrics))
 
-            # 4. Extract STDIO Data
-            if 'STDIO' in report.records:
-                stdio_df = report.records['STDIO'].to_df()
-                if 'STDIO_BYTES_READ' in stdio_df.columns:
-                    record_summary['stdio_read_bytes'] = stdio_df['STDIO_BYTES_READ'].sum()
-                if 'STDIO_BYTES_WRITTEN' in stdio_df.columns:
-                    record_summary['stdio_write_bytes'] = stdio_df['STDIO_BYTES_WRITTEN'].sum()
-            
-            # 5. Extract HDF5 Data
-            if 'H5' in report.records:
-                hdf5_df = report.records['H5'].to_df()
-                if 'H5_BYTES_READ' in hdf5_df.columns:
-                    record_summary['hdf5_read_bytes'] = hdf5_df['H5_BYTES_READ'].sum()
-                if 'H5_BYTES_WRITTEN' in hdf5_df.columns:
-                    record_summary['hdf5_write_bytes'] = hdf5_df['H5_BYTES_WRITTEN'].sum()
-
-            # 6. Extract NetCDF Data
-            if 'NC' in report.records:
-                netcdf_df = report.records['NC'].to_df()
-                if 'NC_BYTES_READ' in netcdf_df.columns:
-                    record_summary['netcdf_read_bytes'] = netcdf_df['NC_BYTES_READ'].sum()
-                if 'NC_BYTES_WRITTEN' in netcdf_df.columns:
-                    record_summary['netcdf_write_bytes'] = netcdf_df['NC_BYTES_WRITTEN'].sum()
-
-            # Append the lightweight summary to our master list
             summary_records.append(record_summary)
-            
-        except Exception as e:
-            print(f"Error parsing {log_path.name}: {e}")
 
-    # Convert the list of summaries directly into a DataFrame
+        except Exception as e:
+            print(f"Critical error opening {log_path.name}: {e}")
+
     if summary_records:
         master_df = pd.DataFrame(summary_records)
         print("Aggregated parsing complete!")
@@ -95,35 +129,54 @@ def aggregate_darshan_logs(base_dir: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 # ==========================================
-# Usage & Analysis
+# Command Line Execution & Analysis
 # ==========================================
 if __name__ == "__main__":
-    log_directory = "./darshan_logs"
-    
-    # Process the logs
-    df = aggregate_darshan_logs(log_directory)
-    
-    if not df.empty:
-        print("\n--- Aggregated I/O Analysis ---")
-        
-        # Calculate totals across the entire dataset in Gigabytes
-        gb_divisor = 1024**3
-        
-        print("\nTotal I/O by Interface (GB):")
-        print(f"POSIX Read:   {df['posix_read_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"POSIX Write:  {df['posix_write_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"MPI-IO Read:  {df['mpiio_read_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"MPI-IO Write: {df['mpiio_write_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"STDIO Read:   {df['stdio_read_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"STDIO Write:  {df['stdio_write_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"HDF5 Read:   {df['hdf5_read_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"HDF5 Write:  {df['hdf5_write_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"NetCDF Read:   {df['netcdf_read_bytes'].sum() / gb_divisor:,.2f} GB")
-        print(f"NetCDF Write:  {df['netcdf_write_bytes'].sum() / gb_divisor:,.2f} GB")        
+    parser = argparse.ArgumentParser(description="Parse Darshan logs for whole-system I/O analysis.")
+    parser.add_argument("log_dir", type=str, help="Path to the directory containing .darshan logs")
+    parser.add_argument("-o", "--output", type=str, default="darshan_comprehensive.csv",
+                        help="Output file path. Use .csv or .parquet extension.")
 
-        # Determine which application pushed the most MPI-IO traffic
-        print("\nTop 3 Executables by MPI-IO Write Volume:")
-        top_mpi = df.groupby('exe')['mpiio_write_bytes'].sum().sort_values(ascending=False).head(3)
-        # Format the output cleanly
-        for exe, bytes_written in top_mpi.items():
-            print(f"{exe}: {bytes_written / gb_divisor:,.2f} GB")
+    args = parser.parse_args()
+
+    df = aggregate_darshan_logs(args.log_dir)
+
+    if not df.empty:
+        # Save dataset
+        if args.output.endswith('.parquet'):
+            df.to_parquet(args.output, index=False)
+        else:
+            df.to_csv(args.output, index=False)
+        print(f"\n[SUCCESS] Aggregated dataset saved to: {args.output}")
+
+        # --- Quick System-Wide Sanity Check ---
+        print("\n--- System-Wide I/O Health Snapshot ---")
+        
+        # Calculate cluster-level aggregates
+        total_runtime_hrs = df['runtime_sec'].sum() / 3600
+        gb_divisor = 1024**3
+        total_posix_read = df['POSIX_BYTES_READ'].sum() / gb_divisor
+        total_posix_write = df['POSIX_BYTES_WRITTEN'].sum() / gb_divisor
+        
+        # Avoid division by zero
+        total_posix_reads = df['POSIX_READS'].sum()
+        total_posix_writes = df['POSIX_WRITES'].sum()
+        avg_read_size_kb = (df['POSIX_BYTES_READ'].sum() / total_posix_reads / 1024) if total_posix_reads > 0 else 0
+        avg_write_size_kb = (df['POSIX_BYTES_WRITTEN'].sum() / total_posix_writes / 1024) if total_posix_writes > 0 else 0
+
+        total_io_time = df['POSIX_F_READ_TIME'].sum() + df['POSIX_F_WRITE_TIME'].sum()
+        total_meta_time = df['POSIX_F_META_TIME'].sum()
+
+        print(f"Total Jobs Parsed:      {len(df)}")
+        print(f"Total Compute Hours:    {total_runtime_hrs:,.2f} hrs")
+        print(f"Total POSIX Read:       {total_posix_read:,.2f} GB")
+        print(f"Total POSIX Write:      {total_posix_write:,.2f} GB")
+        print(f"Avg POSIX Read Size:    {avg_read_size_kb:,.2f} KB")
+        print(f"Avg POSIX Write Size:   {avg_write_size_kb:,.2f} KB")
+        
+        print(f"\nTime Spent in I/O (Cumulative App-level Time):")
+        print(f"Data Transfer Time:     {total_io_time:,.2f} sec")
+        print(f"Metadata Ops Time:      {total_meta_time:,.2f} sec")
+        
+        if total_meta_time > total_io_time:
+            print("\n[WARNING] System-wide metadata time exceeds data transfer time. Expect filesystem latency issues.")
