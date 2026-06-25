@@ -19,7 +19,7 @@ def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: flo
     Groups data by executable to identify overarching I/O patterns.
     Filters out one-off jobs and low-impact applications using thresholds.
     """
-    print(f"\n--- 4. Application I/O Pattern Profiling ---")
+    print(f"\nApplication I/O Pattern Profiling")
     print(f"Filtering criteria: >= {min_jobs} jobs AND (>= {min_volume_gb} GB OR >= {min_runtime_hours} hours)")
     
     # 1. Filter by job count first to save computation
@@ -111,6 +111,7 @@ def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: flo
     sorted_profiles = heavy_hitters.sort_values('Total Vol (GB)', ascending=False)
     
     print(f"Profiled {len(heavy_hitters)} heavy-hitter applications:\n")
+    print(f"Total number of jobs     Total runtime (hrs) Total data volume (GB)    Read %     Seq %    Pattern \n")
     print(sorted_profiles[display_cols].to_string())
     
     sorted_profiles.to_csv('report_app_profiles.csv')
