@@ -16,8 +16,8 @@ def load_data(file_path: str) -> pd.DataFrame:
 
 def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: float = 10.0, min_runtime_hours: float = 1.0):
     """
-    Groups data by executable to identify overarching I/O patterns.
-    Filters out one-off jobs and low-impact applications using thresholds.
+    Groups data by executable to identify overarching I/O patterns, 
+    tracks explicit write volumes, and provides a breakdown of pattern categories.
     """
     print(f"\nApplication I/O Pattern Profiling")
     print(f"Filtering criteria: >= {min_jobs} jobs AND (>= {min_volume_gb} GB OR >= {min_runtime_hours} hours)")
@@ -46,7 +46,8 @@ def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: flo
         posix_seq_reads=('POSIX_SEQ_READS', 'sum'),
         posix_seq_writes=('POSIX_SEQ_WRITES', 'sum'),
         meta_time=('POSIX_F_META_TIME', 'sum'),
-        io_time=('POSIX_F_READ_TIME', 'sum')
+        io_time=('POSIX_F_READ_TIME', 'sum'),
+        write_time=('POSIX_F_WRITE_TIME', 'sum')  # Pulled up front for better performance
     )
     
     # Add MPI/H5/NC writes to totals
@@ -54,13 +55,15 @@ def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: flo
     app_profiles['h5_total'] += df_apps.groupby('exe')['H5_BYTES_WRITTEN'].sum()
     app_profiles['nc_total'] += df_apps.groupby('exe')['NC_BYTES_WRITTEN'].sum()
     
-    # Calculate Total Volume (GB) and Total Runtime (Hours)
+    # Calculate Breakdown Volumes (GB) and Total Runtime (Hours)
+    app_profiles['Read Vol (GB)'] = (app_profiles['posix_read'] / (1024**3)).round(2)
+    app_profiles['Write Vol (GB)'] = (app_profiles['posix_write'] / (1024**3)).round(2)
+    
     total_rw_bytes = app_profiles['posix_read'] + app_profiles['posix_write']
     app_profiles['Total Vol (GB)'] = (total_rw_bytes / (1024**3)).round(2)
     app_profiles['Total Runtime (Hrs)'] = (app_profiles['total_runtime'] / 3600).round(2)
     
     # 3. Apply Volume and Runtime Thresholds
-    # Keep the app if it exceeds EITHER the volume threshold OR the runtime threshold
     heavy_hitters = app_profiles[
         (app_profiles['Total Vol (GB)'] >= min_volume_gb) | 
         (app_profiles['Total Runtime (Hrs)'] >= min_runtime_hours)
@@ -95,7 +98,7 @@ def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: flo
         else:
             tags.append("Mixed R/W")
             
-        io_total_time = row['io_time'] + df_apps.groupby('exe')['POSIX_F_WRITE_TIME'].sum().loc[row.name]
+        io_total_time = row['io_time'] + row['write_time']
         if row['meta_time'] > io_total_time and row['meta_time'] > 60:
             tags.append("Metadata-Heavy!")
             
@@ -103,19 +106,38 @@ def process_applications(df: pd.DataFrame, min_jobs: int = 3, min_volume_gb: flo
 
     heavy_hitters['Pattern'] = heavy_hitters.apply(assign_pattern, axis=1)
     
-    # Format for display
+    # Format for per-app display
     heavy_hitters['Seq %'] = (heavy_hitters['seq_ratio'] * 100).round(1).astype(str) + '%'
     heavy_hitters['Read %'] = (heavy_hitters['read_ratio'] * 100).round(1).astype(str) + '%'
     
-    display_cols = ['total_jobs', 'Total Runtime (Hrs)', 'Total Vol (GB)', 'Read %', 'Seq %', 'Pattern']
+    display_cols = ['total_jobs', 'Total Runtime (Hrs)', 'Read Vol (GB)', 'Write Vol (GB)', 'Total Vol (GB)', 'Read %', 'Seq %', 'Pattern']
     sorted_profiles = heavy_hitters.sort_values('Total Vol (GB)', ascending=False)
     
-    print(f"Profiled {len(heavy_hitters)} heavy-hitter applications:\n")
-    print(f"Total number of jobs     Total runtime (hrs) Total data volume (GB)    Read %     Seq %    Pattern \n")
+    print(f"\nProfiled {len(heavy_hitters)} heavy-hitter applications:\n")
     print(sorted_profiles[display_cols].to_string())
     
     sorted_profiles.to_csv('report_app_profiles.csv')
     print("\n-> Full application profiles saved to report_app_profiles.csv")
+    
+    # 6. New Step: Generate and Display Overall Pattern Summary Table
+    print("\n" + "="*85)
+    print("OVERALL I/O PATTERN GROUP SUMMARY")
+    print("="*85)
+    
+    summary_profiles = heavy_hitters.groupby('Pattern').agg(
+        num_apps=('total_jobs', 'count'),
+        total_jobs=('total_jobs', 'sum'),
+        total_read_vol=('Read Vol (GB)', 'sum'),
+        total_write_vol=('Write Vol (GB)', 'sum'),
+        total_combined_vol=('Total Vol (GB)', 'sum')
+    ).sort_values('total_combined_vol', ascending=False)
+    
+    # Print the grouped breakdown table cleanly
+    headers = ['Apps Count', 'Total Jobs Run', 'Total Read (GB)', 'Total Write (GB)', 'Combined Vol (GB)']
+    print(summary_profiles.to_string(header=headers))
+    
+    summary_profiles.to_csv('report_pattern_summary.csv')
+    print("\n-> Pattern group summary saved to report_pattern_summary.csv")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze aggregated Darshan I/O data for HPC anti-patterns.")
