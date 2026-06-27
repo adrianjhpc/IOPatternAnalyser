@@ -8,16 +8,18 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 def load_data(file_path: str) -> pd.DataFrame:
-    """Loads the Darshan aggregated data from CSV or Parquet."""
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"Data file not found: {file_path}")
         
     print(f"Loading data from {file_path}...")
     if path.suffix == '.parquet':
-        return pd.read_parquet(file_path)
+        # Force fastparquet instead of pyarrow (requires: pip install fastparquet)
+        return pd.read_parquet(file_path, engine='fastparquet') 
     else:
-        return pd.read_csv(file_path)
+        # Fall back to the pure Python CSV parser. It is slower, but immune 
+        # to C-level buffer overflow crashes.
+        return pd.read_csv(file_path, engine='python')
 
 def process_applications(df: pd.DataFrame, file_name, min_jobs: int = 3, min_volume_gb: float = 10.0, min_runtime_hours: float = 1.0):
     """

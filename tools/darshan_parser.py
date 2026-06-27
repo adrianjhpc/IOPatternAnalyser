@@ -3,6 +3,35 @@ import argparse
 from pathlib import Path
 import pandas as pd
 import darshan
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+def parse_single_log(log_path, posix_metrics, mpiio_metrics, stdio_metrics, h5_metrics, nc_metrics):
+    """Isolated function to parse a single log. Runs in a separate process."""
+    try:
+        report = darshan.DarshanReport(str(log_path))
+        
+        start_time = int(report.metadata.get('start_time', 0))
+        end_time = int(report.metadata.get('end_time', 0))
+        runtime = end_time - start_time if end_time > start_time else 0
+
+        record_summary = {
+            'source_file': log_path.name,
+            'job_id': report.metadata.get('jobid', 'unknown'),
+            'uid': report.metadata.get('uid', 'unknown'),
+            'exe': report.metadata.get('exe', 'unknown'),
+            'nprocs': int(report.metadata.get('nprocs', 1)),
+            'runtime_sec': runtime
+        }
+
+        record_summary.update(extract_module_metrics(report, 'POSIX', posix_metrics))
+        record_summary.update(extract_module_metrics(report, 'MPI-IO', mpiio_metrics))
+        record_summary.update(extract_module_metrics(report, 'STDIO', stdio_metrics))
+        record_summary.update(extract_module_metrics(report, 'H5', h5_metrics))
+        record_summary.update(extract_module_metrics(report, 'NC', nc_metrics))
+
+        return record_summary
+    except Exception as e:
+        return {"error": f"Failed to parse {log_path.name}: {e}"}
 
 def extract_module_metrics(report: darshan.DarshanReport, module_name: str, metrics: list) -> dict:
     """
@@ -90,35 +119,28 @@ def aggregate_darshan_logs(base_dir: str) -> pd.DataFrame:
     h5_metrics = ['H5_BYTES_READ', 'H5_BYTES_WRITTEN', 'H5_F_META_TIME']
     nc_metrics = ['NC_BYTES_READ', 'NC_BYTES_WRITTEN']
 
-    for log_path in log_files:
-        try:
-            report = darshan.DarshanReport(str(log_path))
-            
-            # 1. Job Metadata & Runtime
-            start_time = int(report.metadata.get('start_time', 0))
-            end_time = int(report.metadata.get('end_time', 0))
-            runtime = end_time - start_time if end_time > start_time else 0
+# Use a ProcessPoolExecutor to isolate C-level crashes
+    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
+        # Submit all jobs to the process pool
+        futures = {
+            executor.submit(
+                parse_single_log, log_path, posix_metrics, mpiio_metrics, stdio_metrics, h5_metrics, nc_metrics
+            ): log_path for log_path in log_files if log_path.stat().st_size >= 1024
+        }
 
-            record_summary = {
-                'source_file': log_path.name,
-                'job_id': report.metadata.get('jobid', 'unknown'),
-                'uid': report.metadata.get('uid', 'unknown'),
-                'exe': report.metadata.get('exe', 'unknown'),
-                'nprocs': int(report.metadata.get('nprocs', 1)),
-                'runtime_sec': runtime
-            }
-
-            # 2. Extract Module Metrics
-            record_summary.update(extract_module_metrics(report, 'POSIX', posix_metrics))
-            record_summary.update(extract_module_metrics(report, 'MPI-IO', mpiio_metrics))
-            record_summary.update(extract_module_metrics(report, 'STDIO', stdio_metrics))
-            record_summary.update(extract_module_metrics(report, 'H5', h5_metrics))
-            record_summary.update(extract_module_metrics(report, 'NC', nc_metrics))
-
-            summary_records.append(record_summary)
-
-        except Exception as e:
-            print(f"Critical error opening {log_path.name}: {e}")
+        for future in as_completed(futures):
+            log_path = futures[future]
+            try:
+                result = future.result()
+                if "error" in result:
+                    print(result["error"])
+                else:
+                    summary_records.append(result)
+            except Exception as e: # This catches standard Python errors in the worker
+                print(f"Worker raised error for {log_path.name}: {e}")
+            except (ProcessLookupError, BrokenPipeError, EOFError) as e: 
+                # This catches the worker dying due to a C-level abort
+                print(f"CRITICAL: Worker process violently crashed on {log_path.name}. File is severely corrupted.")
 
     if summary_records:
         master_df = pd.DataFrame(summary_records)
